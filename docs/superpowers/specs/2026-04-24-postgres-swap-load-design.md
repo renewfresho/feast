@@ -19,7 +19,7 @@ The swap approach:
 
 ## Scope
 
-- Opt-in only via `swap_load: bool = False` in `PostgreSQLOnlineStoreConfig`
+- Opt-in only via `swap_load` set to `True` in `PostgreSQLOnlineStoreConfig`
 - Only applies to `materialize()` — `materialize_incremental()` is unchanged
 - PostgreSQL online store only — no other backends affected
 
@@ -75,7 +75,7 @@ def commit_swap_load(table_name: str, config: PostgreSQLOnlineStoreConfig) -> No
 
 ### Changes to `postgres.py`
 
-`online_write_batch()` branches on `swap_load`:
+`online_write_batch()` branches on `swap_load`. When `swap_load=True` it lazily creates the staging table on the first batch, then inserts into it:
 
 ```python
 if config.swap_load:
@@ -86,9 +86,28 @@ else:
     # existing upsert path unchanged
 ```
 
-A new `finalize_online_write_batch()` method (or equivalent hook) calls `commit_swap_load()` after all batches are written. This requires a small change to the materialization orchestration to call finalize when batching is complete.
+`PostgreSQLOnlineStore` also overrides `finalize_online_write()` (see below) to call `commit_swap_load()`. `update()` and the read path are untouched.
 
-`update()` and the read path are untouched.
+### New method on `OnlineStore` base class: `finalize_online_write()`
+
+The batching loop in `LocalOutputNode.execute()` (`nodes.py`) calls `online_write_batch()` per batch with no signal for "this is the last one". A new method is added after the loop:
+
+```python
+# nodes.py — after the batching loop
+for batch in batches:
+    online_store.online_write_batch(...)
+
+online_store.finalize_online_write(config=context.repo_config, table=self.feature_view)
+```
+
+The base `OnlineStore` class gets a default no-op implementation so all other stores (Redis, DynamoDB, SQLite, etc.) are completely unaffected:
+
+```python
+def finalize_online_write(self, config: RepoConfig, table: FeatureView) -> None:
+    pass
+```
+
+`PostgreSQLOnlineStore` overrides it to call `commit_swap_load()` when `swap_load=True`, otherwise does nothing.
 
 ## Data Flow
 
@@ -145,7 +164,9 @@ Using testcontainer (postgres:16). Assert:
 | File | Change |
 |------|--------|
 | `sdk/python/feast/infra/online_stores/postgres_online_store/postgres_swap_load.py` | New — swap load logic |
-| `sdk/python/feast/infra/online_stores/postgres_online_store/postgres.py` | Branch in `online_write_batch()` |
+| `sdk/python/feast/infra/online_stores/postgres_online_store/postgres.py` | Branch in `online_write_batch()`, override `finalize_online_write()` |
 | `sdk/python/feast/infra/online_stores/postgres_online_store/postgresql.py` | Add `swap_load` config field |
+| `sdk/python/feast/infra/online_stores/base.py` | Add no-op `finalize_online_write()` to base class |
+| `sdk/python/feast/infra/compute_engines/local/nodes.py` | Call `finalize_online_write()` after batching loop |
 | `sdk/python/tests/unit/infra/online_store/test_postgres_swap_load.py` | New — unit tests |
 | `sdk/python/tests/integration/online_store/test_postgres_versioning.py` | Add swap load integration tests |

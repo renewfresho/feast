@@ -28,7 +28,6 @@ from feast.infra.online_stores.postgres_online_store.postgres_swap_load import (
     begin_swap_load,
     commit_swap_load,
     drop_staging,
-    staging_exists,
 )
 from feast.infra.online_stores.postgres_online_store.postgres_swap_load import (
     write_batch as swap_write_batch,
@@ -153,8 +152,7 @@ class PostgreSQLOnlineStore(OnlineStore):
                 config.registry.enable_online_feature_view_versioning,
             )
             with self._get_conn(config) as conn:
-                if not staging_exists(conn, table_name):
-                    begin_swap_load(conn, table_name)
+                begin_swap_load(conn, table_name)
                 swap_write_batch(conn, table_name, insert_values)
         else:
             sql_query = sql.SQL(

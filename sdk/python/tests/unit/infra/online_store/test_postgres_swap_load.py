@@ -255,7 +255,7 @@ class TestOnlineWriteBatchBranching:
             executed = str(mock_cursor.executemany.call_args[0][0])
             assert "ON CONFLICT" in executed
 
-    def test_swap_load_true_calls_write_batch(self):
+    def test_swap_load_true_calls_begin_and_write_batch(self):
         from feast.infra.online_stores.postgres_online_store.postgres import (
             PostgreSQLOnlineStore,
         )
@@ -268,12 +268,11 @@ class TestOnlineWriteBatchBranching:
         with (
             patch.object(store, "_get_conn") as mock_conn_ctx,
             patch(
+                "feast.infra.online_stores.postgres_online_store.postgres.begin_swap_load"
+            ) as mock_begin,
+            patch(
                 "feast.infra.online_stores.postgres_online_store.postgres.swap_write_batch"
             ) as mock_write,
-            patch(
-                "feast.infra.online_stores.postgres_online_store.postgres.staging_exists",
-                return_value=True,
-            ),
         ):
             mock_conn = MagicMock()
             mock_conn_ctx.return_value.__enter__ = lambda s: mock_conn
@@ -281,6 +280,7 @@ class TestOnlineWriteBatchBranching:
 
             store.online_write_batch(config, table, [], None)
 
+            mock_begin.assert_called_once()
             mock_write.assert_called_once()
 
     def test_finalize_calls_commit_swap_load_when_swap_load_true(self):

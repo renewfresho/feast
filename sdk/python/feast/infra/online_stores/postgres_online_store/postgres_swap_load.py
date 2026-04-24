@@ -11,21 +11,6 @@ def staging_table_name(table_name: str) -> str:
     return f"{table_name}_staging"
 
 
-def staging_exists(conn: Connection, table_name: str) -> bool:
-    staging = staging_table_name(table_name)
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT EXISTS (
-                SELECT FROM pg_tables WHERE tablename = %s
-            )
-            """,
-            (staging,),
-        )
-        row = cur.fetchone()
-        return bool(row[0]) if row else False
-
-
 def begin_swap_load(conn: Connection, table_name: str) -> None:
     staging = staging_table_name(table_name)
     logger.info("swap_load: creating staging table %s", staging)

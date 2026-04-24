@@ -203,3 +203,175 @@ class TestPostgresVersioningIntegration:
 
         # Delete the versioned table
         store.update(config, [fv], [], [], [], False)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not shutil.which("docker"),
+    reason="Docker not available",
+)
+class TestPostgresSwapLoadIntegration:
+    """Integration tests for swap_load mode with a real PostgreSQL database."""
+
+    @pytest.fixture(autouse=True)
+    def setup_postgres(self):
+        try:
+            from testcontainers.postgres import PostgresContainer
+        except ImportError:
+            pytest.skip("testcontainers[postgres] not installed")
+
+        self.container = PostgresContainer(
+            "postgres:16",
+            username="root",
+            password="testpass",  # pragma: allowlist secret
+            dbname="test",
+        ).with_exposed_ports(5432)
+        self.container.start()
+        self.port = self.container.get_exposed_port(5432)
+        yield
+        self.container.stop()
+
+    def _make_config(self, swap_load: bool = True):
+        from feast.infra.online_stores.postgres_online_store.postgres import (
+            PostgreSQLOnlineStoreConfig,
+        )
+
+        return RepoConfig(
+            project="test_project",
+            provider="local",
+            online_store=PostgreSQLOnlineStoreConfig(
+                type="postgres",
+                host="localhost",
+                port=int(self.port),
+                user="root",
+                password="testpass",  # pragma: allowlist secret
+                database="test",
+                sslmode="disable",
+                swap_load=swap_load,
+            ),
+            registry=RegistryConfig(
+                path="/tmp/test_pg_swap_registry.pb",
+                enable_online_feature_view_versioning=False,
+            ),
+            entity_key_serialization_version=3,
+        )
+
+    def _staging_exists(self, config) -> bool:
+        from feast.infra.online_stores.postgres_online_store.postgres import (
+            PostgreSQLOnlineStore,
+        )
+
+        store = PostgreSQLOnlineStore()
+        with store._get_conn(config) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT EXISTS (SELECT FROM pg_tables WHERE tablename = %s)",
+                    ("test_project_driver_stats_staging",),
+                )
+                row = cur.fetchone()
+                return bool(row[0]) if row else False
+
+    def test_swap_load_writes_and_reads_correctly(self):
+        """swap_load=True materialises features readable via online_read."""
+        config = self._make_config(swap_load=True)
+        store = PostgreSQLOnlineStore()
+        fv = _make_feature_view()
+        store.update(config, [], [fv], [], [], False)
+
+        entity_key = _make_entity_key(1001)
+        val = ValueProto()
+        val.int64_val = 99
+        now = datetime.now(tz=timezone.utc)
+
+        store.online_write_batch(
+            config, fv, [(entity_key, {"trips_today": val}, now, now)], None
+        )
+        store.finalize_online_write(config, fv)
+
+        result = store.online_read(config, fv, [entity_key], ["trips_today"])
+        assert result[0][1] is not None
+        assert result[0][1]["trips_today"].int64_val == 99
+
+    def test_swap_load_no_staging_table_after_success(self):
+        """Staging table is cleaned up after a successful swap."""
+        config = self._make_config(swap_load=True)
+        store = PostgreSQLOnlineStore()
+        fv = _make_feature_view()
+        store.update(config, [], [fv], [], [], False)
+
+        entity_key = _make_entity_key(1002)
+        val = ValueProto()
+        val.int64_val = 55
+        now = datetime.now(tz=timezone.utc)
+
+        store.online_write_batch(
+            config, fv, [(entity_key, {"trips_today": val}, now, now)], None
+        )
+        store.finalize_online_write(config, fv)
+
+        assert not self._staging_exists(config)
+
+    def test_swap_load_second_run_replaces_data(self):
+        """A second swap_load run replaces previous data atomically."""
+        config = self._make_config(swap_load=True)
+        store = PostgreSQLOnlineStore()
+        fv = _make_feature_view()
+        store.update(config, [], [fv], [], [], False)
+
+        entity_key = _make_entity_key(1003)
+        now = datetime.now(tz=timezone.utc)
+
+        # First run
+        val1 = ValueProto()
+        val1.int64_val = 10
+        store.online_write_batch(
+            config, fv, [(entity_key, {"trips_today": val1}, now, now)], None
+        )
+        store.finalize_online_write(config, fv)
+
+        # Second run with different entity — entity 1003 should be gone after swap
+        entity_key2 = _make_entity_key(1004)
+        val2 = ValueProto()
+        val2.int64_val = 20
+
+        store.online_write_batch(
+            config,
+            fv,
+            [(entity_key2, {"trips_today": val2}, now, now)],
+            None,
+        )
+        store.finalize_online_write(config, fv)
+
+        # Entity 1003 from first run should be gone (swap replaces entire table)
+        result = store.online_read(config, fv, [entity_key], ["trips_today"])
+        assert result[0] == (None, None)
+
+        result2 = store.online_read(config, fv, [entity_key2], ["trips_today"])
+        assert result2[0][1]["trips_today"].int64_val == 20
+
+    def test_swap_load_false_uses_upsert(self):
+        """swap_load=False retains existing upsert behaviour."""
+        config = self._make_config(swap_load=False)
+        store = PostgreSQLOnlineStore()
+        fv = _make_feature_view()
+        store.update(config, [], [fv], [], [], False)
+
+        entity_key = _make_entity_key(2001)
+        now = datetime.now(tz=timezone.utc)
+
+        val1 = ValueProto()
+        val1.int64_val = 100
+        store.online_write_batch(
+            config, fv, [(entity_key, {"trips_today": val1}, now, now)], None
+        )
+        store.finalize_online_write(config, fv)
+
+        val2 = ValueProto()
+        val2.int64_val = 200
+        store.online_write_batch(
+            config, fv, [(entity_key, {"trips_today": val2}, now, now)], None
+        )
+        store.finalize_online_write(config, fv)
+
+        result = store.online_read(config, fv, [entity_key], ["trips_today"])
+        assert result[0][1]["trips_today"].int64_val == 200

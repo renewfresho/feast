@@ -24,6 +24,15 @@ from feast import Entity, FeatureView, ValueType
 from feast.infra.key_encoding_utils import get_list_val_str, serialize_entity_key
 from feast.infra.online_stores.helpers import _to_naive_utc, compute_table_id
 from feast.infra.online_stores.online_store import OnlineStore
+from feast.infra.online_stores.postgres_online_store.postgres_swap_load import (
+    begin_swap_load,
+    commit_swap_load,
+    drop_staging,
+    staging_exists,
+)
+from feast.infra.online_stores.postgres_online_store.postgres_swap_load import (
+    write_batch as swap_write_batch,
+)
 from feast.infra.online_stores.vector_store import VectorStoreConfig
 from feast.infra.utils.postgres.connection_utils import (
     _get_conn,
@@ -47,6 +56,7 @@ SUPPORTED_DISTANCE_METRICS_DICT = {
 
 class PostgreSQLOnlineStoreConfig(PostgreSQLConfig, VectorStoreConfig):
     type: Literal["postgres"] = "postgres"
+    swap_load: bool = False
 
 
 class PostgreSQLOnlineStore(OnlineStore):
@@ -105,7 +115,6 @@ class PostgreSQLOnlineStore(OnlineStore):
         ],
         progress: Optional[Callable[[int], Any]],
     ) -> None:
-        # Format insert values
         insert_values = []
         for entity_key, values, timestamp, created_ts in data:
             entity_key_bin = serialize_entity_key(
@@ -120,7 +129,6 @@ class PostgreSQLOnlineStore(OnlineStore):
                 vector_val = None
                 value_text = None
 
-                # Check if the feature type is STRING
                 if val.WhichOneof("val") == "string_val":
                     value_text = val.string_val
 
@@ -138,37 +146,68 @@ class PostgreSQLOnlineStore(OnlineStore):
                     )
                 )
 
-        # Create insert query
-        sql_query = sql.SQL(
+        if config.online_store.swap_load:
+            table_name = _table_id(
+                config.project,
+                table,
+                config.registry.enable_online_feature_view_versioning,
+            )
+            with self._get_conn(config) as conn:
+                if not staging_exists(conn, table_name):
+                    begin_swap_load(conn, table_name)
+                swap_write_batch(conn, table_name, insert_values)
+        else:
+            sql_query = sql.SQL(
+                """
+                INSERT INTO {}
+                (entity_key, feature_name, value, value_text, vector_value, event_ts, created_ts)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (entity_key, feature_name) DO
+                UPDATE SET
+                    value = EXCLUDED.value,
+                    value_text = EXCLUDED.value_text,
+                    vector_value = EXCLUDED.vector_value,
+                    event_ts = EXCLUDED.event_ts,
+                    created_ts = EXCLUDED.created_ts;
             """
-            INSERT INTO {}
-            (entity_key, feature_name, value, value_text, vector_value, event_ts, created_ts)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (entity_key, feature_name) DO
-            UPDATE SET
-                value = EXCLUDED.value,
-                value_text = EXCLUDED.value_text,
-                vector_value = EXCLUDED.vector_value,
-                event_ts = EXCLUDED.event_ts,
-                created_ts = EXCLUDED.created_ts;
-        """
-        ).format(
-            sql.Identifier(
-                _table_id(
-                    config.project,
-                    table,
-                    config.registry.enable_online_feature_view_versioning,
+            ).format(
+                sql.Identifier(
+                    _table_id(
+                        config.project,
+                        table,
+                        config.registry.enable_online_feature_view_versioning,
+                    )
                 )
             )
-        )
-
-        # Push data into the online store
-        with self._get_conn(config) as conn, conn.cursor() as cur:
-            cur.executemany(sql_query, insert_values)
-            conn.commit()
+            with self._get_conn(config) as conn, conn.cursor() as cur:
+                cur.executemany(sql_query, insert_values)
+                conn.commit()
 
         if progress:
             progress(len(data))
+
+    def finalize_online_write(
+        self,
+        config: RepoConfig,
+        table: FeatureView,
+    ) -> None:
+        if not config.online_store.swap_load:
+            return
+        table_name = _table_id(
+            config.project,
+            table,
+            config.registry.enable_online_feature_view_versioning,
+        )
+        has_string_features = any(
+            f.dtype.to_value_type() == ValueType.STRING for f in table.features
+        )
+        try:
+            with self._get_conn(config) as conn:
+                commit_swap_load(conn, table_name, has_string_features)
+        except Exception:
+            with self._get_conn(config) as conn:
+                drop_staging(conn, table_name)
+            raise
 
     def online_read(
         self,

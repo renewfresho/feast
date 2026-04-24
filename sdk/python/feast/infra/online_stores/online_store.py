@@ -964,3 +964,10 @@ class OnlineStore(ABC):
 
     async def close(self) -> None:
         pass
+
+    def finalize_online_write(
+        self,
+        config: RepoConfig,
+        table: FeatureView,
+    ) -> None:
+        pass

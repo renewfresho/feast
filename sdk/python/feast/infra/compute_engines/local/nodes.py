@@ -397,6 +397,10 @@ class LocalOutputNode(LocalNode):
                     data=rows_to_write,
                     progress=lambda x: None,
                 )
+            online_store.finalize_online_write(
+                config=context.repo_config,
+                table=self.feature_view,
+            )
 
         if self.feature_view.offline:
             offline_store = context.offline_store

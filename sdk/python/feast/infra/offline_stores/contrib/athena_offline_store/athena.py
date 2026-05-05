@@ -97,7 +97,10 @@ class AthenaOfflineStore(OfflineStore):
 
         date_partition_column = data_source.date_partition_column
 
-        athena_client = aws_utils.get_athena_data_client(config.offline_store.region)
+        athena_client = aws_utils.get_athena_data_client(
+            config.offline_store.region,
+            s3_staging_location=config.offline_store.s3_staging_location,
+        )
         s3_resource = aws_utils.get_s3_resource(config.offline_store.region)
 
         start_date = start_date.astimezone(tz=timezone.utc)
@@ -147,7 +150,10 @@ class AthenaOfflineStore(OfflineStore):
             join_key_columns + feature_name_columns + timestamp_fields
         )
 
-        athena_client = aws_utils.get_athena_data_client(config.offline_store.region)
+        athena_client = aws_utils.get_athena_data_client(
+            config.offline_store.region,
+            s3_staging_location=config.offline_store.s3_staging_location,
+        )
         s3_resource = aws_utils.get_s3_resource(config.offline_store.region)
 
         date_partition_column = data_source.date_partition_column
@@ -200,7 +206,10 @@ class AthenaOfflineStore(OfflineStore):
         for fv in feature_views:
             assert isinstance(fv.batch_source, AthenaSource)
 
-        athena_client = aws_utils.get_athena_data_client(config.offline_store.region)
+        athena_client = aws_utils.get_athena_data_client(
+            config.offline_store.region,
+            s3_staging_location=config.offline_store.s3_staging_location,
+        )
         s3_resource = aws_utils.get_s3_resource(config.offline_store.region)
 
         # get pandas dataframe consisting of 1 row (LIMIT 1) and generate the schema out of it
@@ -301,7 +310,10 @@ class AthenaOfflineStore(OfflineStore):
         destination = logging_config.destination
         assert isinstance(destination, AthenaLoggingDestination)
 
-        athena_client = aws_utils.get_athena_data_client(config.offline_store.region)
+        athena_client = aws_utils.get_athena_data_client(
+            config.offline_store.region,
+            s3_staging_location=config.offline_store.s3_staging_location,
+        )
         s3_resource = aws_utils.get_s3_resource(config.offline_store.region)
         if isinstance(data, Path):
             s3_path = f"{config.offline_store.s3_staging_location}/logged_features/{uuid.uuid4()}"

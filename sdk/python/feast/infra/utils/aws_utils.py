@@ -729,13 +729,36 @@ def list_s3_files(aws_region: str, path: str) -> List[str]:
 # Athena utils
 
 
-def get_athena_data_client(aws_region: str):
+class _AthenaClientWithOutput:
+    """Wraps a boto3 Athena client to inject ResultConfiguration.OutputLocation automatically."""
+
+    def __init__(self, client, output_location: str) -> None:
+        self._client = client
+        self._output_location = output_location
+
+    def start_query_execution(self, **kwargs):
+        if "ResultConfiguration" not in kwargs:
+            kwargs["ResultConfiguration"] = {"OutputLocation": self._output_location}
+        return self._client.start_query_execution(**kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._client, name)
+
+
+def get_athena_data_client(aws_region: str, s3_staging_location: Optional[str] = None):
     """
     Get the athena Data API Service client for the given AWS region.
+
+    If s3_staging_location is provided, returns a proxy that injects
+    ResultConfiguration.OutputLocation into every start_query_execution call.
+    This is required when the Athena workgroup has no default output location.
     """
-    return boto3.client(
+    client = boto3.client(
         "athena", config=Config(region_name=aws_region, user_agent=get_user_agent())
     )
+    if s3_staging_location:
+        return _AthenaClientWithOutput(client, s3_staging_location)
+    return client
 
 
 @retry(

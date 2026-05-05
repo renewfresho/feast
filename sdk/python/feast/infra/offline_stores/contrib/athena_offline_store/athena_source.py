@@ -207,7 +207,10 @@ class AthenaSource(DataSource):
 
         assert isinstance(config.offline_store, AthenaOfflineStoreConfig)
 
-        client = aws_utils.get_athena_data_client(config.offline_store.region)
+        client = aws_utils.get_athena_data_client(
+            config.offline_store.region,
+            s3_staging_location=config.offline_store.s3_staging_location,
+        )
         if self.table:
             try:
                 table = client.get_table_metadata(

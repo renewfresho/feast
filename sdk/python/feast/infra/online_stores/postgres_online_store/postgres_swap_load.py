@@ -1,12 +1,18 @@
 """Swap-load helpers for the PostgreSQL online store.
 
 Manual rollback after a bad swap (run in psql, single transaction):
+    -- Tables live in the store's db_schema (or the connecting user's own
+    -- schema if db_schema is unset), so put it on the search path first:
+    SET search_path TO <db_schema or feast/postgres user>;
     BEGIN;
     ALTER TABLE {table} RENAME TO {table}_bad;
     ALTER TABLE {table}_prev RENAME TO {table};
     ALTER INDEX IF EXISTS {table}_prev_ek RENAME TO {table}_ek;
     COMMIT;
 The next successful swap replaces {table}_prev and cleans this up.
+{table}_bad is left behind for post-mortem; drop it manually once
+investigated (the next successful swap only cleans up {table}_prev, not
+{table}_bad).
 """
 
 import logging

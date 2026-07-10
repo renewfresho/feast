@@ -1,3 +1,14 @@
+"""Swap-load helpers for the PostgreSQL online store.
+
+Manual rollback after a bad swap (run in psql, single transaction):
+    BEGIN;
+    ALTER TABLE {table} RENAME TO {table}_bad;
+    ALTER TABLE {table}_prev RENAME TO {table};
+    ALTER INDEX IF EXISTS {table}_prev_ek RENAME TO {table}_ek;
+    COMMIT;
+The next successful swap replaces {table}_prev and cleans this up.
+"""
+
 import logging
 from typing import List, Tuple
 
@@ -9,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 def staging_table_name(table_name: str) -> str:
     return f"{table_name}_staging"
+
+
+def prev_table_name(table_name: str) -> str:
+    return f"{table_name}_prev"
 
 
 def begin_swap_load(conn: Connection, table_name: str) -> None:
@@ -52,7 +67,7 @@ def commit_swap_load(
     conn: Connection, table_name: str, has_string_features: bool = False
 ) -> None:
     staging = staging_table_name(table_name)
-    old = f"{table_name}_old"
+    prev = prev_table_name(table_name)
     logger.info("swap_load: building indexes on %s", staging)
     with conn.cursor() as cur:
         cur.execute(
@@ -71,23 +86,37 @@ def commit_swap_load(
                 )
             )
         logger.info("swap_load: swapping %s -> %s", staging, table_name)
+        # Retain exactly one previous generation as {table}_prev for manual
+        # rollback (rename {table} to {table}_bad, then {table}_prev to {table}).
+        cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(prev)))
         cur.execute(
             sql.SQL("ALTER TABLE {} RENAME TO {}").format(
                 sql.Identifier(table_name),
-                sql.Identifier(old),
+                sql.Identifier(prev),
             )
         )
+        # Move the outgoing generation's indexes out of the way so the staging
+        # indexes can take the live names. IF EXISTS: on the first-ever swap the
+        # live table was created by the online store's update() and has no _ek.
+        cur.execute(
+            sql.SQL("ALTER INDEX IF EXISTS {} RENAME TO {}").format(
+                sql.Identifier(f"{table_name}_ek"),
+                sql.Identifier(f"{prev}_ek"),
+            )
+        )
+        if has_string_features:
+            cur.execute(
+                sql.SQL("ALTER INDEX IF EXISTS {} RENAME TO {}").format(
+                    sql.Identifier(f"{table_name}_fts_idx"),
+                    sql.Identifier(f"{prev}_fts_idx"),
+                )
+            )
         cur.execute(
             sql.SQL("ALTER TABLE {} RENAME TO {}").format(
                 sql.Identifier(staging),
                 sql.Identifier(table_name),
             )
         )
-        cur.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(old)))
-        # Rename the indexes from their staging-based names to match the live table
-        # name.  This is required so that subsequent swap-load runs can create
-        # fresh indexes under the staging-based names without hitting a
-        # DuplicateTable error (Postgres keeps index names when a table is renamed).
         cur.execute(
             sql.SQL("ALTER INDEX {} RENAME TO {}").format(
                 sql.Identifier(f"{staging}_ek"),
@@ -102,7 +131,9 @@ def commit_swap_load(
                 )
             )
     conn.commit()
-    logger.info("swap_load: swap complete for %s", table_name)
+    logger.info(
+        "swap_load: swap complete for %s (previous kept as %s)", table_name, prev
+    )
 
 
 def drop_staging(conn: Connection, table_name: str) -> None:

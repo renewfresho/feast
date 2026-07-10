@@ -186,10 +186,14 @@ class TestSwapLoadModule:
             str(call.args[0])
             for call in conn.cursor.return_value.execute.call_args_list
         ]
-        rename_calls = [s for s in all_sql if "RENAME" in s.upper()]
-        assert len(rename_calls) >= 2
-        # staging → active rename must happen after active → old
-        assert "proj_driver_stats_staging" in rename_calls[1]
+        # Find the table renames (not index renames)
+        table_rename_calls = [
+            s for s in all_sql if "ALTER TABLE" in s.upper() and "RENAME" in s.upper()
+        ]
+        assert len(table_rename_calls) >= 2
+        # First: active → prev, Second: staging → active
+        assert "proj_driver_stats_prev" in table_rename_calls[0]
+        assert "proj_driver_stats_staging" in table_rename_calls[1]
 
     def test_drop_staging_drops_if_exists(self):
         from feast.infra.online_stores.postgres_online_store.postgres_swap_load import (
@@ -325,3 +329,54 @@ class TestOnlineWriteBatchBranching:
         ) as mock_commit:
             store.finalize_online_write(config, table)
             mock_commit.assert_not_called()
+
+
+class TestPrevRetention:
+    def _run_commit(self, has_string_features=False):
+        from feast.infra.online_stores.postgres_online_store import (
+            postgres_swap_load as psl,
+        )
+
+        conn = MagicMock()
+        cur = conn.cursor.return_value.__enter__.return_value
+        psl.commit_swap_load(conn, "oc_fv", has_string_features=has_string_features)
+        # Render each Composed query to real SQL text so assertions can pin
+        # exact statement-level behavior (identifiers come out double-quoted).
+        return [c.args[0].as_string() for c in cur.execute.call_args_list]
+
+    def test_prev_generation_is_retained_not_dropped(self):
+        statements = self._run_commit()
+        joined = " ".join(statements)
+        assert 'DROP TABLE IF EXISTS "oc_fv_prev"' in joined
+        assert 'ALTER TABLE "oc_fv" RENAME TO "oc_fv_prev"' in joined
+        # the live generation must never be dropped
+        assert 'DROP TABLE "oc_fv_old"' not in joined
+        assert 'RENAME TO "oc_fv_old"' not in joined
+
+    def test_live_indexes_renamed_to_prev_before_staging_swap(self):
+        statements = self._run_commit()
+        joined = " ".join(statements)
+        assert 'ALTER INDEX IF EXISTS "oc_fv_ek" RENAME TO "oc_fv_prev_ek"' in joined
+        # staging index still takes the live name afterwards
+        assert 'ALTER INDEX "oc_fv_staging_ek" RENAME TO "oc_fv_ek"' in joined
+        # ordering: prev index rename must happen before staging index rename
+        prev_idx = next(i for i, s in enumerate(statements) if "oc_fv_prev_ek" in s)
+        stg_idx = next(
+            i for i, s in enumerate(statements) if 'ALTER INDEX "oc_fv_staging_ek"' in s
+        )
+        assert prev_idx < stg_idx
+
+    def test_fts_index_renamed_when_string_features(self):
+        statements = self._run_commit(has_string_features=True)
+        joined = " ".join(statements)
+        assert (
+            'ALTER INDEX IF EXISTS "oc_fv_fts_idx" RENAME TO "oc_fv_prev_fts_idx"'
+            in joined
+        )
+
+    def test_prev_table_name_helper(self):
+        from feast.infra.online_stores.postgres_online_store.postgres_swap_load import (
+            prev_table_name,
+        )
+
+        assert prev_table_name("oc_fv") == "oc_fv_prev"

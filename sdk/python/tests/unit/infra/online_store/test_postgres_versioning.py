@@ -36,69 +36,74 @@ class TestPostgresTableId:
 
     def test_default_no_versioning(self):
         fv = _make_feature_view()
-        assert _table_id("proj", fv) == "feast_proj_driver_stats"
+        assert _table_id("proj", fv) == "proj_driver_stats"
 
     def test_versioning_explicitly_disabled(self):
         fv = _make_feature_view()
-        assert (
-            _table_id("proj", fv, enable_versioning=False) == "feast_proj_driver_stats"
-        )
+        assert _table_id("proj", fv, enable_versioning=False) == "proj_driver_stats"
 
     def test_versioning_enabled_no_version_set(self):
         fv = _make_feature_view()
-        assert (
-            _table_id("proj", fv, enable_versioning=True) == "feast_proj_driver_stats"
-        )
+        assert _table_id("proj", fv, enable_versioning=True) == "proj_driver_stats"
 
     def test_versioning_enabled_with_current_version_number(self):
         fv = _make_feature_view()
         fv.current_version_number = 3
-        assert (
-            _table_id("proj", fv, enable_versioning=True)
-            == "feast_proj_driver_stats_v3"
-        )
+        assert _table_id("proj", fv, enable_versioning=True) == "proj_driver_stats_v3"
 
     def test_version_zero_no_suffix(self):
         fv = _make_feature_view()
         fv.current_version_number = 0
-        assert (
-            _table_id("proj", fv, enable_versioning=True) == "feast_proj_driver_stats"
-        )
+        assert _table_id("proj", fv, enable_versioning=True) == "proj_driver_stats"
 
     def test_projection_version_tag_takes_priority(self):
         fv = _make_feature_view()
         fv.current_version_number = 2
         fv.projection.version_tag = 5
-        assert (
-            _table_id("proj", fv, enable_versioning=True)
-            == "feast_proj_driver_stats_v5"
-        )
+        assert _table_id("proj", fv, enable_versioning=True) == "proj_driver_stats_v5"
 
     def test_projection_version_tag_zero_no_suffix(self):
         fv = _make_feature_view()
         fv.projection.version_tag = 0
         fv.current_version_number = 3
-        assert (
-            _table_id("proj", fv, enable_versioning=True) == "feast_proj_driver_stats"
-        )
+        assert _table_id("proj", fv, enable_versioning=True) == "proj_driver_stats"
 
     def test_different_project_names(self):
         fv = _make_feature_view()
         fv.current_version_number = 1
-        assert (
-            _table_id("prod", fv, enable_versioning=True)
-            == "feast_prod_driver_stats_v1"
-        )
+        assert _table_id("prod", fv, enable_versioning=True) == "prod_driver_stats_v1"
         assert (
             _table_id("staging", fv, enable_versioning=True)
-            == "feast_staging_driver_stats_v1"
+            == "staging_driver_stats_v1"
         )
 
     def test_different_feature_view_names(self):
         fv = _make_feature_view(name="user_stats")
         fv.current_version_number = 2
+        assert _table_id("proj", fv, enable_versioning=True) == "proj_user_stats_v2"
+
+
+class TestPostgresTableIdPrefix:
+    """Test _table_id's table_name_prefix: empty by default (upstream parity),
+    applied verbatim ahead of the project when set."""
+
+    def test_default_prefix_is_empty(self):
+        fv = _make_feature_view()
+        assert _table_id("proj", fv) == "proj_driver_stats"
+
+    def test_custom_prefix_applied(self):
+        fv = _make_feature_view()
         assert (
-            _table_id("proj", fv, enable_versioning=True) == "feast_proj_user_stats_v2"
+            _table_id("proj", fv, table_name_prefix="feast_")
+            == "feast_proj_driver_stats"
+        )
+
+    def test_prefix_combines_with_versioning(self):
+        fv = _make_feature_view()
+        fv.current_version_number = 3
+        assert (
+            _table_id("proj", fv, enable_versioning=True, table_name_prefix="feast_")
+            == "feast_proj_driver_stats_v3"
         )
 
 

@@ -58,6 +58,11 @@ SUPPORTED_DISTANCE_METRICS_DICT = {
 class PostgreSQLOnlineStoreConfig(PostgreSQLConfig, VectorStoreConfig):
     type: Literal["postgres"] = "postgres"
     swap_load: bool = False
+    # Prepended to every online-store table name this store computes. Empty
+    # by default (upstream behavior unchanged); set it if this store's
+    # tables share a database/schema with unrelated tables and need their
+    # own unambiguous, greppable namespace.
+    table_name_prefix: str = ""
 
 
 class PostgreSQLOnlineStore(OnlineStore):
@@ -152,6 +157,7 @@ class PostgreSQLOnlineStore(OnlineStore):
                 config.project,
                 table,
                 config.registry.enable_online_feature_view_versioning,
+                config.online_store.table_name_prefix,
             )
             with self._get_conn(config) as conn:
                 begin_swap_load(conn, table_name)
@@ -176,6 +182,7 @@ class PostgreSQLOnlineStore(OnlineStore):
                         config.project,
                         table,
                         config.registry.enable_online_feature_view_versioning,
+                        config.online_store.table_name_prefix,
                     )
                 )
             )
@@ -197,6 +204,7 @@ class PostgreSQLOnlineStore(OnlineStore):
             config.project,
             table,
             config.registry.enable_online_feature_view_versioning,
+            config.online_store.table_name_prefix,
         )
         has_string_features = any(
             f.dtype.to_value_type() == ValueType.STRING for f in table.features
@@ -298,6 +306,7 @@ class PostgreSQLOnlineStore(OnlineStore):
                         config.project,
                         table,
                         config.registry.enable_online_feature_view_versioning,
+                        config.online_store.table_name_prefix,
                     )
                 ),
             )
@@ -314,6 +323,7 @@ class PostgreSQLOnlineStore(OnlineStore):
                         config.project,
                         table,
                         config.registry.enable_online_feature_view_versioning,
+                        config.online_store.table_name_prefix,
                     )
                 ),
             )
@@ -396,15 +406,18 @@ class PostgreSQLOnlineStore(OnlineStore):
                 )
 
             versioning = config.registry.enable_online_feature_view_versioning
+            table_name_prefix = config.online_store.table_name_prefix
             for table in tables_to_delete:
                 if versioning:
                     _drop_all_version_tables(cur, project, table, schema_name)
                 else:
-                    table_name = _table_id(project, table)
+                    table_name = _table_id(
+                        project, table, table_name_prefix=table_name_prefix
+                    )
                     cur.execute(_drop_table_and_index(table_name))
 
             for table in tables_to_keep:
-                table_name = _table_id(project, table, versioning)
+                table_name = _table_id(project, table, versioning, table_name_prefix)
                 if config.online_store.vector_enabled:
                     vector_value_type = "vector"
                 else:
@@ -460,13 +473,16 @@ class PostgreSQLOnlineStore(OnlineStore):
         project = config.project
         schema_name = config.online_store.db_schema or config.online_store.user
         versioning = config.registry.enable_online_feature_view_versioning
+        table_name_prefix = config.online_store.table_name_prefix
         try:
             with self._get_conn(config) as conn, conn.cursor() as cur:
                 for table in tables:
                     if versioning:
                         _drop_all_version_tables(cur, project, table, schema_name)
                     else:
-                        table_name = _table_id(project, table)
+                        table_name = _table_id(
+                            project, table, table_name_prefix=table_name_prefix
+                        )
                         cur.execute(_drop_table_and_index(table_name))
                 conn.commit()
         except Exception:
@@ -533,7 +549,10 @@ class PostgreSQLOnlineStore(OnlineStore):
         ] = []
         with self._get_conn(config, autocommit=True) as conn, conn.cursor() as cur:
             table_name = _table_id(
-                project, table, config.registry.enable_online_feature_view_versioning
+                project,
+                table,
+                config.registry.enable_online_feature_view_versioning,
+                config.online_store.table_name_prefix,
             )
 
             # Search query template to find the top k items that are closest to the given embedding
@@ -639,6 +658,7 @@ class PostgreSQLOnlineStore(OnlineStore):
             config.project,
             table,
             config.registry.enable_online_feature_view_versioning,
+            config.online_store.table_name_prefix,
         )
 
         with self._get_conn(config, autocommit=True) as conn, conn.cursor() as cur:
@@ -900,11 +920,13 @@ class PostgreSQLOnlineStore(OnlineStore):
         return result
 
 
-def _table_id(project: str, table: FeatureView, enable_versioning: bool = False) -> str:
-    # "feast_" distinguishes these tables at a glance from the legacy aoe_*
-    # tables that share this same RDS instance/schema, and gives any tooling
-    # (e.g. an orphaned-table audit) an unambiguous namespace to scan for.
-    return f"feast_{compute_table_id(project, table, enable_versioning)}"
+def _table_id(
+    project: str,
+    table: FeatureView,
+    enable_versioning: bool = False,
+    table_name_prefix: str = "",
+) -> str:
+    return f"{table_name_prefix}{compute_table_id(project, table, enable_versioning)}"
 
 
 def _drop_table_and_index(table_name):

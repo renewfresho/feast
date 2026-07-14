@@ -901,7 +901,10 @@ class PostgreSQLOnlineStore(OnlineStore):
 
 
 def _table_id(project: str, table: FeatureView, enable_versioning: bool = False) -> str:
-    return compute_table_id(project, table, enable_versioning)
+    # "feast_" distinguishes these tables at a glance from the legacy aoe_*
+    # tables that share this same RDS instance/schema, and gives any tooling
+    # (e.g. an orphaned-table audit) an unambiguous namespace to scan for.
+    return f"feast_{compute_table_id(project, table, enable_versioning)}"
 
 
 def _drop_table_and_index(table_name):

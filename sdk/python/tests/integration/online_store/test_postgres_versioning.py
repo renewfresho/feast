@@ -266,7 +266,7 @@ class TestPostgresSwapLoadIntegration:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT EXISTS (SELECT FROM pg_tables WHERE tablename = %s)",
-                    ("test_project_driver_stats_staging",),
+                    ("feast_test_project_driver_stats_staging",),
                 )
                 row = cur.fetchone()
                 return bool(row[0]) if row else False

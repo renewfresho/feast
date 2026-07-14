@@ -45,6 +45,8 @@ from feast.protos.feast.types.Value_pb2 import Value as ValueProto
 from feast.repo_config import RepoConfig
 from feast.utils import _build_retrieve_online_document_record
 
+logger = logging.getLogger(__name__)
+
 SUPPORTED_DISTANCE_METRICS_DICT = {
     "cosine": "<=>",
     "L1": "<+>",
@@ -203,9 +205,41 @@ class PostgreSQLOnlineStore(OnlineStore):
             with self._get_conn(config) as conn:
                 commit_swap_load(conn, table_name, has_string_features)
         except Exception:
+            self._cleanup_staging_after_failed_commit(config, table_name)
+            raise
+
+    def _cleanup_staging_after_failed_commit(
+        self, config: RepoConfig, table_name: str
+    ) -> None:
+        """Best-effort cleanup after a failed commit_swap_load.
+
+        The connection used for the failed commit may still be mid-transaction
+        in an error state (psycopg raises on any further use of a connection
+        left that way, including toggling autocommit) -- it must be rolled
+        back directly here, bypassing _get_conn's set_autocommit call, before
+        it's safe to reuse for drop_staging. Any failure in this cleanup is
+        logged, never raised: it must not replace or mask the original
+        commit_swap_load exception the caller is already re-raising.
+        """
+        try:
+            if config.online_store.conn_type == ConnectionType.pool:
+                # The connection checked out for the failed commit was never
+                # returned to the pool (the failing call's context manager
+                # never reached its post-yield putconn), so there's no
+                # reference to roll back here; skip rather than risk acting
+                # on an unrelated pooled connection.
+                return
+            if self._conn is not None:
+                self._conn.rollback()
             with self._get_conn(config) as conn:
                 drop_staging(conn, table_name)
-            raise
+        except Exception:
+            logger.warning(
+                "swap_load: cleanup after failed commit_swap_load for %s also "
+                "failed; staging table may be left behind for manual cleanup",
+                table_name,
+                exc_info=True,
+            )
 
     def online_read(
         self,
